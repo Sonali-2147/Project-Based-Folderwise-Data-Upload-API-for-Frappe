@@ -1,73 +1,156 @@
-# Project Based Folderwise Data Upload API for Frappe
+# Training Data Upload Utility for Frappe
 
 ## Overview
-This API allows users to upload various types of data, including images, labels, and model files, to the Frappe file system. It supports structured storage of data in a project-wise manner within the `Home/File` directory.
+This utility provides functionality to upload and organize machine learning training data (images) and models within the Frappe framework. It's designed specifically for defect detection applications, categorizing images as either "ok" or "defective".
 
 ## Features
-- Validates that the specified project exists in the system.
-- Creates a structured, project-wise folder system for storing different types of data.
-- Saves files securely in the Frappe private file system.
-- Generates unique file names to prevent collisions.
-- Associates files with the respective project for easy retrieval.
+- Upload multiple training images with labels
+- Organize files in a structured folder hierarchy
+- Support for uploading trained model files (.h5 format)
+- Automatic folder creation and file management
+- Integration with Frappe's file system and permissions model
 
-## API Endpoint
-```python
-@frappe.whitelist()
-def upload_data(project_name, data_files, model_file=None)
-```
+## Function: `upload_training_data`
 
-## Request Parameters
-| Parameter      | Type   | Description |
-|---------------|--------|-------------|
-| project_name  | str    | Name of the project to associate the data with. |
-| data_files    | list   | A list of dictionaries containing file data and metadata. |
-| model_file    | dict   | (Optional) A dictionary containing the base64-encoded `.h5` model file data. |
+### Description
+Uploads training data (images and labels) to the Frappe file system. Also allows uploading a trained model file in .h5 format.
 
+### Parameters
 
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `project_name` | str | The name of the project to associate the training data with |
+| `training_data` | list | A list of dictionaries containing image data and labels |
+| `model_file` | dict (optional) | Dictionary containing model file data and filename |
 
-## Folder Structure
-The API creates the following project-wise folder hierarchy:
+#### `training_data` format
+Each item in the list should be a dictionary with:
+- `image` (str): Base64 encoded image data
+- `label` (str): The label for the image ('ok' or 'defective')
+
+#### `model_file` format
+If provided, should be a dictionary with:
+- `file_data` (str): Base64 encoded model file data (.h5 format)
+- `file_name` (str): The name of the model file
+
+### Folder Structure
+The utility creates the following folder structure:
 ```
 Home/
- ├── File/
- │   ├── <project_name>/
- │   │   ├── images/ (for image files)
- │   │   ├── documents/ (for document files)
- │   │   ├── others/ (for other types of data)
- │   │   ├── model/ (for storing the .h5 model file)
+└── training_data/
+    └── [project_name]/
+        ├── ok/
+        │   └── [image files]
+        ├── defective/
+        │   └── [image files]
+        └── model/
+            └── [model files]
 ```
 
-## Folder Creation
-The `create_folder` function is used to ensure structured storage. It works as follows:
+### Helper Function: `create_folder`
+
+This internal function creates a folder in Frappe's file system if it doesn't exist:
 
 ```python
-def create_folder(folder_name, parent_folder=None):
-    """Creates a folder in the Frappe file system if it does not exist."""
-    folder_path = os.path.join(parent_folder, folder_name) if parent_folder else folder_name
-    if not frappe.db.exists("File", {"file_name": folder_name, "is_folder": 1}):
-        folder = frappe.get_doc({
-            "doctype": "File",
-            "file_name": folder_name,
-            "is_folder": 1,
-            "folder": parent_folder or "Home"
-        })
-        folder.insert(ignore_permissions=True)
-    return folder_path
+def create_folder(folder_name, parent_folder="Home"):
+    """Create a folder in Frappe's file system if it doesn't exist"""
+    # Determine the exact parent folder name for querying
+    parent_name = parent_folder
+    if parent_folder != "Home":
+        parent_doc = frappe.get_doc("File", parent_folder)
+        parent_name = parent_doc.name
+    
+    # Check if folder already exists under the parent
+    folder_exists = frappe.db.exists(
+        "File", 
+        {"file_name": folder_name, "folder": parent_name, "is_folder": 1}
+    )
+    
+    if folder_exists:
+        return frappe.get_doc(
+            "File", 
+            {"file_name": folder_name, "folder": parent_name, "is_folder": 1}
+        )
+    
+    # Create new folder
+    folder = frappe.new_doc("File")
+    folder.file_name = folder_name
+    folder.is_folder = 1
+    folder.folder = parent_name
+    
+    # Important: these fields help ensure the folder is visible in File Manager
+    folder.is_private = 1
+    folder.attached_to_doctype = "Project"
+    folder.attached_to_name = project_name
+    
+    folder.insert(ignore_permissions=True)
+    frappe.db.commit()  # Commit immediately to ensure folder is created
+    
+    return folder
 ```
 
-This function ensures that the correct folder hierarchy is created before storing any files.
+### Return Value
+Returns a dictionary containing:
+- `message`: Success message
+- `files`: List of uploaded files with metadata
+- `project`: Project name
+- `count`: Number of files uploaded
+- `folder_path`: Path to the project folder
+- `model_file`: Model file information (if uploaded)
 
-## Error Handling
-- If the project does not exist, the API throws an error.
-- If file data or metadata is missing, an exception is raised.
-- If saving the files fails, the system logs an error and rolls back changes.
+### Example Usage
+```python
+# Example client-side code to call the function
+import frappe
+import json
+import base64
+
+def upload_training_images(project_name, image_files, labels, model_file=None):
+    training_data = []
+    
+    for i, image_file in enumerate(image_files):
+        with open(image_file, "rb") as f:
+            image_data = base64.b64encode(f.read()).decode('utf-8')
+            
+        training_data.append({
+            "image": image_data,
+            "label": labels[i]  # 'ok' or 'defective'
+        })
+    
+    model_data = None
+    if model_file:
+        with open(model_file, "rb") as f:
+            model_data = {
+                "file_data": base64.b64encode(f.read()).decode('utf-8'),
+                "file_name": model_file.split("/")[-1]
+            }
+    
+    result = frappe.call({
+        'method': 'your_app.your_module.upload_training_data',
+        'args': {
+            'project_name': project_name,
+            'training_data': json.dumps(training_data),
+            'model_file': json.dumps(model_data) if model_data else None
+        }
+    })
+    
+    return result
+```
+
+## Requirements
+- Frappe Framework
+- Access to Frappe's file system and database
+- Proper permissions to create files and folders
 
 ## Notes
-- Ensure that the user has appropriate permissions to create files in the Frappe file system.
-- The function commits database changes after successful execution.
-- Files are stored securely in the private file system for data protection.
+- Images are expected to be in PNG format
+- Model files should be in .h5 format (Keras/TensorFlow saved models)
+- The utility automatically commits changes to the database
+- In case of errors, a full rollback is performed
 
-## Usage
-This API can be used for various purposes, including machine learning projects, document storage, and general data management within the Frappe framework.
-
-
+## Error Handling
+The utility includes comprehensive error handling:
+- Validates that the project exists
+- Checks for required fields in training data
+- Handles potential exceptions during file operations
+- Logs detailed error information to Frappe's error log
